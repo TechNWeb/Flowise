@@ -64,6 +64,8 @@ const createPrediction = async (req: Request, res: Response, next: NextFunction)
                     chatId = req.body.chatId ?? req.body.overrideConfig?.sessionId ?? uuidv4()
                     req.body.chatId = chatId
                 }
+                let heartbeat: NodeJS.Timeout | undefined
+
                 try {
                     sseStreamer.addExternalClient(chatId, res)
                     res.setHeader('Content-Type', 'text/event-stream')
@@ -71,6 +73,32 @@ const createPrediction = async (req: Request, res: Response, next: NextFunction)
                     res.setHeader('Connection', 'keep-alive')
                     res.setHeader('X-Accel-Buffering', 'no') //nginx config: https://serverfault.com/a/801629
                     res.flushHeaders()
+
+                    // Heartbeat for SSE: keeps the connection active through proxies / ALB idle timeouts.
+                    // Default: 15s. Override with SSE_HEARTBEAT_MS env var.
+                    const heartbeatMs = Number.parseInt(process.env.SSE_HEARTBEAT_MS || '15000', 10)
+                    if (Number.isFinite(heartbeatMs) && heartbeatMs > 0) {
+                        const sendHeartbeat = () => {
+                            try {
+                                // SSE comment line - ignored by EventSource clients, but counts as traffic.
+                                res.write(`: heartbeat ${Date.now()}\n\n`)
+                                // Some Express setups expose res.flush() via compression middleware.
+                                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                                const anyRes = res as any
+                                if (typeof anyRes.flush === 'function') anyRes.flush()
+                            } catch (e) {
+                                // If the socket is gone, stop heartbeating.
+                                if (heartbeat) clearInterval(heartbeat)
+                            }
+                        }
+
+                        heartbeat = setInterval(sendHeartbeat, heartbeatMs)
+
+                        // Stop heartbeats when client disconnects.
+                        req.on('close', () => {
+                            if (heartbeat) clearInterval(heartbeat)
+                        })
+                    }
 
                     if (process.env.MODE === MODE.QUEUE) {
                         getRunningExpressApp().redisSubscriber.subscribe(chatId)
@@ -84,6 +112,7 @@ const createPrediction = async (req: Request, res: Response, next: NextFunction)
                     }
                     next(error)
                 } finally {
+                    if (heartbeat) clearInterval(heartbeat)
                     sseStreamer.removeClient(chatId)
                 }
             } else {
@@ -114,3 +143,4 @@ export default {
     createPrediction,
     getRateLimiterMiddleware
 }
+

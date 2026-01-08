@@ -1,0 +1,10 @@
+{
+  "apps": [
+    {
+      "name": "flowise",
+      "script": "npm",
+      "args": "run start",
+      "max_memory_restart": "5632M"
+    }
+  ]
+}
